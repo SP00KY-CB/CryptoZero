@@ -5,7 +5,9 @@
 #   cz-enroll <opal-device> <cik-partition> [--pba UEFI64.img] [--escrow FILE]
 #
 # <cik-partition> must be a GPT partition named "$CZ_CIK_PARTNAME" (see docs).
-# Run from the PBA/rescue image so PCR values match what the PBA will see.
+# Run from the signed UEFI64 image booted from USB (Secure Boot ON, same db
+# as in normal use) so PCR 7/11 match what the PBA will see.
+# --pba accepts an image file or the boot USB's block device (e.g. /dev/sda).
 . /usr/lib/cryptozero/cz-lib.sh
 set -e
 
@@ -21,7 +23,6 @@ while [ $# -gt 0 ]; do
 done
 
 [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ] || { echo "No TPM device found."; exit 1; }
-sedutil-cli --isValidSED "$DEV" >/dev/null 2>&1 || true
 sedutil-cli --query "$DEV" | grep -q "Opal 2" || { echo "$DEV is not an Opal 2 drive."; exit 1; }
 
 printf 'Current Opal SID/Admin1 password (empty if drive is not set up yet): '
@@ -79,6 +80,9 @@ else
     sedutil-cli --initialSetup "$KEY" "$DEV"
 fi
 if [ -n "$PBA" ]; then
+    if [ -b "$PBA" ]; then   # boot USB written with the UEFI64 image: copy its first 32 MiB
+        dd if="$PBA" of=/tmp/pba.img bs=1M count=32 2>/dev/null; PBA=/tmp/pba.img
+    fi
     sedutil-cli --enableLockingRange 0 "$KEY" "$DEV"
     sedutil-cli --setLockingRange 0 LK "$KEY" "$DEV"
     sedutil-cli --setMBRDone off "$KEY" "$DEV"

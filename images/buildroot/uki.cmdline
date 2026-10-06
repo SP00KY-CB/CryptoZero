@@ -1,0 +1,1 @@
+loglevel=0 libata.allow_tpm=1 video=efifb:width:1280,height:720 text

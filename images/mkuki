@@ -1,0 +1,24 @@
+#!/bin/bash
+# Build and sign a Unified Kernel Image (kernel + initrd + cmdline in one PE
+# file, systemd-stub) for the UEFI PBA.
+#
+#   SB_KEY=db.key SB_CERT=db.crt ./mkuki <bzImage> <initrd> <cmdline-file> <out.efi>
+#
+# Needs: ukify (systemd >= 253), systemd-boot-efi (linuxx64.efi.stub), sbsigntool.
+# Set SB_UNSIGNED=1 to build an unsigned image (only bootable with Secure Boot off).
+set -euo pipefail
+[ $# -eq 4 ] || { sed -n '2,9p' "$0"; exit 1; }
+KERNEL=$1; INITRD=$2; CMDLINE=$3; OUT=$4
+STUB=${UKI_STUB:-/usr/lib/systemd/boot/efi/linuxx64.efi.stub}
+[ -f "$STUB" ] || { echo "missing $STUB (install systemd-boot-efi)"; exit 1; }
+command -v ukify >/dev/null || { echo "ukify not found (systemd >= 253)"; exit 1; }
+
+SIGN=()
+if [ "${SB_UNSIGNED:-0}" != 1 ]; then
+    [ -f "${SB_KEY:-}" ] && [ -f "${SB_CERT:-}" ] || { echo "Set SB_KEY and SB_CERT (see secureboot/gen-keys.sh), or SB_UNSIGNED=1."; exit 1; }
+    SIGN=(--secureboot-private-key "$SB_KEY" --secureboot-certificate "$SB_CERT")
+fi
+ukify build --linux "$KERNEL" --initrd "$INITRD" --cmdline "@$CMDLINE" \
+    --uname "${UKI_UNAME:-cryptozero-pba}" --stub "$STUB" "${SIGN[@]}" --output "$OUT"
+[ "${#SIGN[@]}" -eq 0 ] || sbverify --cert "$SB_CERT" "$OUT"
+sha256sum "$OUT"

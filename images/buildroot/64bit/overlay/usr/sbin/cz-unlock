@@ -11,6 +11,17 @@ fallback() {
 
 echo "CryptoZero boot authorization"
 
+# TPM present but nothing sealed yet (or TPM was cleared): enrollment mode.
+# The shell grants nothing on an enrolled machine: the drive stays locked
+# until the Opal password is supplied.
+if { [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; } && ! tpm2_readpublic -c "$CZ_TPM_HANDLE" >/dev/null 2>&1; then
+    echo
+    echo "No sealed secret found in the TPM: enrollment mode."
+    echo "  cz-enroll <opal-dev> <cik-partition> --pba <boot-usb-dev> --escrow FILE"
+    echo "  linuxpba      (enter the Opal passphrase manually, e.g. after a TPM clear)"
+    exec /bin/sh -l
+fi
+
 CIKDEV=$(cz_find_cik_dev) || fallback "CIK microSD not found."
 CIK=$(cz_read_cik "$CIKDEV") || fallback "CIK not valid on $CIKDEV."
 

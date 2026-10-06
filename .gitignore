@@ -196,3 +196,7 @@ Doxygen/
 windows/installer/Output/
 # hacked exe files for different flavors
 windows/installer/exe
+# Secure Boot / signing material
+*.key
+*.pem
+secureboot-keys/

@@ -19,34 +19,75 @@ refuses, `cz-unlock` falls back to the stock passphrase prompt.
 Files: `images/buildroot/64bit/overlay/{etc/cryptozero.conf,usr/lib/cryptozero/cz-lib.sh,usr/sbin/cz-unlock,usr/sbin/cz-enroll}`,
 `linuxpba --key-stdin` (LinuxPBA/LinuxPBA.cpp).
 
-## Read this first: security limits
+## Secure Boot: self-signed UKI
 
-1. **Secure Boot must be off for this fork's UEFI PBA** (unsigned syslinux).
-   PCR 7 then only says "Secure Boot is off", and PCR 4 only identifies the
-   syslinux binary – the kernel and initrd are **not** measured. Someone who
-   boots the same `syslinux.efi` with their own kernel/initrd (from USB, with
-   the shadow MBR) can unseal the TPM secret. The **CIK and the PIN** are what
-   actually protect you here. A signed/measured PBA (shim or UKI + Secure
-   Boot, PCR 7/11) is the real fix and is not implemented.
-2. If the CIK card stays in the laptop, a thief has the CIK; only the PIN and
-   TPM lockout remain. Remove the card when unattended, or keep `CZ_USE_PIN=1`.
+The PBA is one **signed Unified Kernel Image** (`EFI/BOOT/BOOTX64.EFI`:
+kernel + initrd + cmdline, systemd-stub) built by `images/buildUEFI64` via
+`images/mkuki`. You sign it with your own key; the firmware trusts it because
+you enrolled your cert in its `db`. Syslinux is no longer used for UEFI.
+A public code-signing CA (DigiCert, Azure Trusted Signing) is *not* a drop-in:
+firmware does not trust those roots.
+
+The TPM secret is bound to **PCR 7** (Secure Boot state/keys) and **PCR 11**
+(UKI contents). With Secure Boot on, a different kernel/initrd/cmdline or an
+unsigned loader cannot unseal it. The stub ignores command-line overrides
+when Secure Boot is on.
+
+The UEFI64 image is also the enrollment/rescue stick: boot it from USB and, if
+the TPM has nothing sealed, it drops to a shell (enrollment mode). Same binary
+=> same PCR 7/11 as when it runs from the shadow MBR.
+
+### 1. Keys (once, keep them offline)
+
+    sudo apt install openssl efitools sbsigntool systemd-boot-efi systemd-ukify
+    images/secureboot/gen-keys.sh ~/.cryptozero-secureboot
+
+### 2. Enroll in the firmware
+
+Easiest: firmware setup -> Secure Boot -> Custom/User mode -> append/enroll a
+`db` key from file, using `db.cer` on a FAT USB stick (keep the existing
+Microsoft entries so option ROMs keep working). Or from Linux with the
+firmware in Setup Mode: `efi-updatevar -f db.auth db` (needs KEK/PK enrolled
+first; `PK.auth`/`KEK.auth` are generated). Leave Secure Boot **on**.
+
+### 3. Build and sign
+
+    export SB_KEY=~/.cryptozero-secureboot/db.key SB_CERT=~/.cryptozero-secureboot/db.crt
+    cd images && ./getresources && ./buildpbaroot && ./buildUEFI64
+
+Needs `ukify` (systemd >= 253), `systemd-boot-efi`, `sbsigntool`. The
+signing step is the only place the key is used; for releases run it on a
+machine or CI runner that holds the key (or use PKCS#11/HSM with `sbsign`).
+Each user should ideally sign their own build.
+
+## Security limits
+
+1. The CIK and PIN still matter: with Secure Boot on the TPM factor is real,
+   but if the CIK card stays in the laptop a thief has it, leaving PIN +
+   TPM lockout. Remove the card when unattended.
+2. **PCR 7 changes** when `db`/`dbx`/Secure Boot state change (including some
+   firmware updates); **PCR 11 changes** with every rebuilt UKI. After either,
+   unsealing fails and the PBA falls back to the passphrase prompt: type the
+   `opal_password` from your escrow file, boot, then re-run `cz-enroll`
+   (from the new USB image) to reseal. A rebuilt PBA must also be re-loaded
+   into the shadow MBR (`cz-enroll --pba`).
 3. **Losing the TPM secret or the CIK loses the data.** Use `--escrow`, keep
    it offline, and consider a second Opal user as break-glass.
 4. Opal passwords are passed on `sedutil-cli` command lines (visible in `ps`
-   inside the PBA/rescue environment only).
-5. Sleep (S3) is unsupported by this sedutil fork; unlocked drives stay
-   unlocked across suspend on some firmware.
+   inside the PBA environment only).
+5. Whoever holds `db.key` can sign anything your firmware will boot.
+6. Sleep (S3) is unsupported by this sedutil fork.
 
-## Status: not built or run
+## Status: partially tested
 
-Only the shell logic (hex/CIK/KDF round trip) was exercised, under `dash`
-on a dev machine. **Nothing was built into an image or tried against a TPM or
-SED.** Specifically unverified: the Buildroot bump 2019.02.6 -> 2022.02.12
-(`images/conf`, needed for tpm2-tools >= 4; the old 4.14 kernel config goes
-through `olddefconfig`), tpm2-tools flag spellings, busybox applet
-availability (`od`, `sha256sum`, `stty`), and the 32-bit image (untouched,
-still stock passphrase PBA and may need the same Buildroot fixes). Test on
-expendable data first.
+Verified on a dev machine: key generation (`gen-keys.sh`), UKI build and
+signing (`mkuki`, with a dummy kernel), `sbverify`, the CIK hex/partition
+parsing and key derivation under `dash`, and that the C++ compiles.
+**Not verified:** a real Buildroot build (the bump 2019.02.6 -> 2022.02.12 in
+`images/conf` and the old 4.14 kernel config via `olddefconfig`), that the
+kernel boots as a UKI under a given firmware, tpm2-tools flag spellings,
+busybox applets (`od`, `sha256sum`, `stty`), TPM unsealing, and anything on
+a real SED. The 32-bit/BIOS images are untouched. Test on expendable data.
 
 ## Setup
 
@@ -54,20 +95,16 @@ expendable data first.
 
        sgdisk --zap-all /dev/sdX && sgdisk -n 1:0:+1M -c 1:CIK /dev/sdX
 
-2. Review `etc/cryptozero.conf` (PCRs, PIN on/off). Build: `images/getresources`,
-   `buildpbaroot`, `buildUEFI64`, `buildrescue Rescue64` as usual.
-3. Boot **Rescue64** from USB with the microSD inserted (enrollment must run
-   in the PBA's boot chain so PCR 4 matches; confirm PCRs after a PBA test
-   boot, see below), then:
+2. Review `etc/cryptozero.conf`, build as above, write
+   `images/UEFI64/UEFI64-*.img.gz` (gunzipped) to a USB stick.
+3. Boot the USB stick with Secure Boot on and the microSD inserted. The TPM is
+   empty, so you get a shell:
 
-       gunzip /usr/sedutil/UEFI64-*.img.gz
-       cz-enroll /dev/nvme0 /dev/mmcblk0p1 --pba /usr/sedutil/UEFI64-*.img --escrow /media/usb/cz-escrow.txt
+       cz-enroll /dev/nvme0 /dev/mmcblk0p1 --pba /dev/sda --escrow /tmp/cz-escrow.txt
 
-   It seals and writes the secrets and **verifies the round trip before
-   touching the drive's Opal configuration**.
-4. Power off, boot normally: the PBA asks for the PIN, reads the CIK, unseals,
-   unlocks and reboots into the OS.
-
-If the unseal fails after a good enrollment, the Rescue and PBA boot chains
-differ in a measured PCR. Drop PCR(s) from `CZ_PCRS` (rebuild, re-enroll) and
-accept the weaker binding, or move to a signed PBA.
+   (`/dev/sda` = the boot USB; copy the escrow file off to offline storage
+   before powering down.) It seals the secrets, writes the CIK, **verifies
+   the TPM unseal and CIK read-back before touching the drive's Opal
+   configuration**, then programs Opal and loads the PBA into the shadow MBR.
+4. Power off, remove the USB stick, boot: the PBA asks for the PIN, reads the
+   CIK, unseals, unlocks and reboots into the OS.

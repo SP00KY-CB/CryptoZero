@@ -10,8 +10,8 @@ if [ x${1} == "xRescue32" ] ; then
 	BUILDTYPE="RESCUE32"
 	ROOTDIR="32bit"
 elif [ x${1} == "xRescue64" ] ; then
-	BUILDTYPE="RESCUE64"
-	ROOTDIR="64bit"
+	echo "Rescue64 is superseded by the signed UEFI64 image (boot it from USB); see docs/TPM_CIK.md"
+	exit 0
 else 
 	echo "NO BUILDTYPE specified defalted to Rescue32"
 fi

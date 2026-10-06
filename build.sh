@@ -12,6 +12,6 @@ cd images
 ./buildbios >>../build/6_buildbios.log 2>&1
 ./buildUEFI64 >>../build/7_buildUEFI64.log 2>&1
 ./buildrescue Rescue32 >>../build/8_buildRescue32.log 2>&1
-./buildrescue Rescue64 >>../build/8_buildRescue64.log 2>&1
+# Rescue64 (syslinux, unsigned) is superseded: boot the UEFI64 image from USB instead (docs/TPM_CIK.md)
 cd ..
 echo "Build done"
