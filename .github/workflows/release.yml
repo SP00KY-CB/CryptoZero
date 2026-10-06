@@ -1,0 +1,149 @@
+name: Release
+
+# Tag push (v*) -> build everything, sign the UEFI PBA, create a DRAFT release.
+# Manual run -> same build, artifacts only. See docs/TPM_CIK.md ("CI/CD").
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      unsigned:
+        description: Build an UNSIGNED UEFI PBA (boots only with Secure Boot off)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  binaries:
+    name: sedutil-cli and linuxpba
+    runs-on: ubuntu-22.04 # older glibc: the binaries run on more distros
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake
+      - run: autoreconf --install && ./configure && make -j"$(nproc)" && strip sedutil-cli linuxpba
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            sedutil-cli
+            linuxpba
+
+  pba-rootfs:
+    name: PBA kernel and rootfs (Buildroot)
+    # Buildroot 2022.02 and the 4.14 kernel predate GCC 13: build on 22.04 (GCC 11).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    env:
+      BR2_DL_DIR: ${{ github.workspace }}/../br-dl
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool pkg-config m4 \
+            g++-multilib libncurses-dev zlib1g-dev unzip zip git python3 wget curl bc \
+            rsync cpio nasm bsdmainutils file
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../br-dl
+          key: buildroot-dl-${{ hashFiles('images/conf', 'images/buildroot/*/.config', 'images/buildroot/64bit/cryptozero.fragment') }}
+          restore-keys: buildroot-dl-
+      - name: Build (32- and 64-bit trees; several hours)
+        working-directory: images
+        run: ./getresources && ./buildpbaroot
+      - name: Check and pack the 64-bit outputs
+        run: |
+          r=images/scratch/buildroot/64bit
+          files="images/bzImage images/rootfs.cpio.xz target/sbin/linuxpba target/sbin/sedutil-cli target/usr/bin/tpm2_unseal"
+          for f in $files; do
+            test -e "$r/$f" || { echo "::error::Buildroot did not produce $r/$f (see the build log above)"; exit 1; }
+          done
+          # -h: store tpm2_unseal (a symlink to tpm2) as a real file
+          # shellcheck disable=SC2086 # $files is a word list
+          tar -C "$r" -czhf pba-rootfs-64.tgz $files
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pba-rootfs-64
+          path: pba-rootfs-64.tgz
+
+  uefi-image:
+    name: Signed UEFI64 PBA image
+    needs: pba-rootfs
+    runs-on: ubuntu-24.04 # ukify / systemd-stub >= 253
+    # 'release' holds SB_DB_KEY / SB_DB_CERT: give it required reviewers and
+    # restrict it to v* tags. Unsigned manual runs never touch it.
+    environment: ${{ inputs.unsigned && 'unsigned' || 'release' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # image name comes from git describe
+      - run: sudo apt-get update && sudo apt-get install -y systemd-ukify systemd-boot-efi sbsigntool gdisk dosfstools
+      - uses: actions/download-artifact@v4
+        with:
+          name: pba-rootfs-64
+      - run: mkdir -p images/scratch/buildroot/64bit && tar -C images/scratch/buildroot/64bit -xzf pba-rootfs-64.tgz
+      - name: Load Secure Boot signing key
+        if: ${{ !inputs.unsigned }}
+        env:
+          SB_DB_KEY: ${{ secrets.SB_DB_KEY }}
+          SB_DB_CERT: ${{ secrets.SB_DB_CERT }}
+        run: |
+          if [ -z "$SB_DB_KEY" ] || [ -z "$SB_DB_CERT" ]; then
+            echo "::error::Set SB_DB_KEY and SB_DB_CERT in the 'release' environment, or run manually with unsigned=true."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$SB_DB_KEY" > "$RUNNER_TEMP/db.key"
+          printf '%s\n' "$SB_DB_CERT" > "$RUNNER_TEMP/db.crt"
+          openssl x509 -in "$RUNNER_TEMP/db.crt" -outform DER -out images/cryptozero-db.cer
+          { echo "SB_KEY=$RUNNER_TEMP/db.key"; echo "SB_CERT=$RUNNER_TEMP/db.crt"; } >> "$GITHUB_ENV"
+      - name: Build UEFI64 image
+        working-directory: images
+        env:
+          SB_UNSIGNED: ${{ inputs.unsigned && '1' || '0' }}
+        run: ./buildUEFI64
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/db.key"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-uefi64
+          if-no-files-found: error
+          path: |
+            images/UEFI64/UEFI64-*.img.gz
+            images/UEFI64/BOOTX64.EFI
+            images/cryptozero-db.cer
+
+  publish:
+    name: Draft GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [binaries, uefi-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Create draft release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum -- * > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft --generate-notes --title "$GITHUB_REF_NAME" -- *

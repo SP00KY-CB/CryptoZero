@@ -3,7 +3,8 @@
 # All secrets are handled as lowercase hex strings; nothing touches disk
 # except the CIK partition itself and TPM objects.
 
-. /etc/cryptozero.conf
+# shellcheck source=/dev/null
+. "${CZ_CONF:-/etc/cryptozero.conf}"
 
 # CIK partition layout: 8-byte magic "CZCIK001" followed by a 32-byte key.
 CZ_MAGIC_HEX=435a43494b303031
@@ -47,6 +48,25 @@ cz_write_cik() {
     hex="$CZ_MAGIC_HEX$2"
     [ "${#hex}" -eq 80 ] || return 1
     cz_hex2bin "$hex" | dd of="$1" bs=40 count=1 conv=fsync 2>/dev/null
+}
+
+# cz_seal TPMHEX PIN WORKDIR: seal TPMHEX at CZ_TPM_HANDLE under the PCR
+# (+PIN) policy, replacing any previous object there.
+cz_seal() {
+    tpm2_evictcontrol -C o -c "$CZ_TPM_HANDLE" >/dev/null 2>&1
+    tpm2_createprimary -C o -c "$3/prim.ctx" >/dev/null &&
+    tpm2_startauthsession -S "$3/s.ctx" >/dev/null &&
+    tpm2_policypcr -S "$3/s.ctx" -l "$CZ_PCRS" -L "$3/pol.dat" >/dev/null &&
+    { [ "$CZ_USE_PIN" != 1 ] || tpm2_policyauthvalue -S "$3/s.ctx" -L "$3/pol.dat" >/dev/null; } &&
+    tpm2_flushcontext "$3/s.ctx" >/dev/null &&
+    cz_hex2bin "$1" > "$3/secret.bin" &&
+    # No userwithauth: the object is usable ONLY via the PCR (+PIN) policy, never
+    # with a bare password. str: stops tpm2-tools reading a PIN like "hex:.." as a prefix.
+    tpm2_create -C "$3/prim.ctx" -L "$3/pol.dat" -i "$3/secret.bin" -p "str:$2" \
+        -a "fixedtpm|fixedparent" -u "$3/k.pub" -r "$3/k.priv" >/dev/null &&
+    tpm2_load -C "$3/prim.ctx" -u "$3/k.pub" -r "$3/k.priv" -c "$3/k.ctx" >/dev/null &&
+    tpm2_evictcontrol -C o -c "$3/k.ctx" "$CZ_TPM_HANDLE" >/dev/null
+    rc=$?; rm -f "$3/secret.bin"; return $rc
 }
 
 # cz_unseal [PIN] -> prints 64 hex chars of the TPM secret

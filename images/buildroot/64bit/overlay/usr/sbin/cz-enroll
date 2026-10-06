@@ -44,23 +44,7 @@ TPMSEC=$(rand_hex); CIK=$(rand_hex)
 W=/tmp/cz-enroll.$$; mkdir -m 700 "$W"; trap 'rm -rf "$W"' EXIT
 
 echo "== Sealing TPM secret to handle $CZ_TPM_HANDLE (PCRs $CZ_PCRS)"
-# Replace a previous enrollment if present.
-tpm2_evictcontrol -C o -c "$CZ_TPM_HANDLE" >/dev/null 2>&1 || true
-tpm2_createprimary -C o -c "$W/prim.ctx" >/dev/null
-tpm2_startauthsession -S "$W/s.ctx" >/dev/null
-tpm2_policypcr -S "$W/s.ctx" -l "$CZ_PCRS" -L "$W/pol.dat" >/dev/null
-if [ "$CZ_USE_PIN" = 1 ]; then
-    tpm2_policyauthvalue -S "$W/s.ctx" -L "$W/pol.dat" >/dev/null
-fi
-tpm2_flushcontext "$W/s.ctx" >/dev/null
-cz_hex2bin "$TPMSEC" > "$W/secret.bin"
-# No userwithauth: the object is usable ONLY via the PCR (+PIN) policy, never
-# with a bare password. str: stops tpm2-tools reading a PIN like "hex:.." as a prefix.
-tpm2_create -C "$W/prim.ctx" -L "$W/pol.dat" -i "$W/secret.bin" -p "str:$PIN" \
-    -a "fixedtpm|fixedparent" -u "$W/k.pub" -r "$W/k.priv" >/dev/null
-tpm2_load -C "$W/prim.ctx" -u "$W/k.pub" -r "$W/k.priv" -c "$W/k.ctx" >/dev/null
-tpm2_evictcontrol -C o -c "$W/k.ctx" "$CZ_TPM_HANDLE" >/dev/null
-rm -f "$W/secret.bin"
+cz_seal "$TPMSEC" "$PIN" "$W" || { echo "Sealing failed; drive untouched."; exit 1; }
 
 echo "== Writing CIK to $CIKPART"
 cz_write_cik "$CIKPART" "$CIK"

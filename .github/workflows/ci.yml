@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build sedutil-cli and linuxpba
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # linux/GitVersion.sh uses git describe
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake
+      - run: autoreconf --install && ./configure && make -j"$(nproc)"
+      - run: make dist # images/buildpbaroot builds the PBA from this tarball
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sedutil-linux-x86_64
+          path: |
+            sedutil-cli
+            linuxpba
+
+  pba-scripts:
+    name: PBA scripts (shellcheck, swtpm tests, UKI signing)
+    runs-on: ubuntu-24.04 # ukify / systemd-stub >= 253
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck dash swtpm swtpm-tools tpm2-tools \
+            systemd-ukify systemd-boot-efi sbsigntool efitools
+      - name: shellcheck
+        run: |
+          shellcheck -S warning images/mkuki images/buildUEFI64 \
+            images/secureboot/gen-keys.sh tests/tpm/run.sh
+          shellcheck -S warning -s sh -e SC1091 tests/tpm/cases.sh \
+            images/buildroot/64bit/overlay/usr/sbin/cz-* \
+            images/buildroot/64bit/overlay/usr/lib/cryptozero/cz-lib.sh
+      - name: TPM seal/unseal tests against swtpm
+        run: tests/tpm/run.sh
+      - name: Generate throwaway keys and build a signed UKI
+        run: |
+          k=$RUNNER_TEMP/sb
+          images/secureboot/gen-keys.sh "$k"
+          head -c 65536 /dev/urandom > "$RUNNER_TEMP/initrd"
+          # Any PE binary stands in for the kernel: this checks packaging + signing.
+          SB_KEY=$k/db.key SB_CERT=$k/db.crt images/mkuki \
+            /usr/lib/systemd/boot/efi/linuxx64.efi.stub "$RUNNER_TEMP/initrd" \
+            images/buildroot/uki.cmdline "$RUNNER_TEMP/test.efi"

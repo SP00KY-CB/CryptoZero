@@ -60,6 +60,26 @@ signing step is the only place the key is used; for releases run it on a
 machine or CI runner that holds the key (or use PKCS#11/HSM with `sbsign`).
 Each user should ideally sign their own build.
 
+### CI/CD (GitHub Actions)
+
+* `.github/workflows/ci.yml` (pushes to master, PRs): builds `sedutil-cli`
+  and `linuxpba` plus `make dist`, shellchecks the PBA scripts, runs
+  `tests/tpm/run.sh` against a software TPM, and builds and signs a test UKI
+  with throwaway keys.
+* `.github/workflows/release.yml` (tags `v*`, or run it manually): builds the
+  binaries and the Buildroot kernel/rootfs (several hours on hosted
+  runners), then builds and signs the UEFI64 image and opens a **draft**
+  release with the binaries, `UEFI64-*.img.gz`, `BOOTX64.EFI`,
+  `cryptozero-db.cer` (the cert users enroll) and `SHA256SUMS`.
+
+One-time setup: Settings -> Environments -> create `release`, add required
+reviewers and limit deployments to tags `v*`, then add the secrets
+`SB_DB_KEY` (contents of `db.key`) and `SB_DB_CERT` (contents of `db.crt`).
+Anyone who can get a workflow to run in that environment can use the key,
+which is why the reviewers matter. A manual run with `unsigned` checked
+needs no key (Secure Boot off only). Release: `git tag v1.16.0 && git push
+origin v1.16.0`, approve the deployment, review and publish the draft.
+
 ## Security limits
 
 1. The CIK and PIN still matter: with Secure Boot on the TPM factor is real,
@@ -92,8 +112,9 @@ signing (`mkuki`, with a dummy kernel), `sbverify`, the CIK hex/partition
 parsing and key derivation under `dash`, the C++ compiles, and the TPM
 logic against a software TPM (swtpm, tpm2-tools 5.6): sealing, PIN/no-PIN
 policy unseal, wrong-PIN refusal, no bare-password bypass, the post-unseal
-PCR lock, re-enrollment over an existing handle.
-**Not verified:** a real Buildroot build (the bump 2019.02.6 -> 2022.02.12 in
+PCR lock, re-enrollment over an existing handle (`tests/tpm/run.sh`, also
+run in CI).
+**Not verified:** the release workflow end to end, a real Buildroot build (the bump 2019.02.6 -> 2022.02.12 in
 `images/conf` and the old 4.14 kernel config via `olddefconfig`), that the
 kernel boots as a UKI under a given firmware, tpm2-tools older than 5.6,
 busybox applets (`od`, `sha256sum`, `stty`), a real TPM's PCR 7/11 values

@@ -2,5 +2,5 @@
 #  Setup versions for image components
 #  This script should be sourced by the other scripts
 SYSLINUX=syslinux-6.03
-BUILDROOT=git://git.buildroot.net/buildroot
+BUILDROOT=https://gitlab.com/buildroot.org/buildroot.git
 BUILDROOT_TAG=2022.02.12
