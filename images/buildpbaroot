@@ -19,6 +19,9 @@ mkdir 64bit
 cp ../../buildroot/64bit/.config 64bit/
 cp ../../buildroot/64bit/* 64bit/
 cp -r ../../buildroot/64bit/overlay 64bit/
+# CryptoZero: TPM2 tooling; refresh the 2019-era .config for the newer Buildroot
+cat ../../buildroot/64bit/cryptozero.fragment >> 64bit/.config
+make O=64bit olddefconfig || die
 # 32 bit system
 mkdir 32bit
 cp ../../buildroot/32bit/.config 32bit/

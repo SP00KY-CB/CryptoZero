@@ -37,6 +37,7 @@ uint8_t UnlockSEDs(char * password) {
 /* Loop through drives */
     char devref[25];
     int failed = 0;
+    uint8_t anyFailed = 0;
     DtaDev *tempDev;
     DtaDev *d;
     DIR *dir;
@@ -98,6 +99,7 @@ uint8_t UnlockSEDs(char * password) {
             if (d->setLockingRange(0, OPAL_LOCKINGSTATE::READWRITE, password)) {
                 failed = 1;
             }
+            if (failed) anyFailed = 1;
             failed ? printf("Drive %-10s %-40s is OPAL Failed  \n", devref, d->getModelNum()) :
                     printf("Drive %-10s %-40s is OPAL Unlocked   \n", devref, d->getModelNum());
             delete d;
@@ -108,5 +110,5 @@ uint8_t UnlockSEDs(char * password) {
         }
 
     }
-    return 0x00;
+    return anyFailed;
 };

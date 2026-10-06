@@ -1,0 +1,35 @@
+#!/bin/sh
+# Pre-boot authentication: TPM secret (+PIN) + CIK on microSD -> Opal unlock.
+# Falls back to the stock passphrase prompt if either factor is unavailable.
+. /usr/lib/cryptozero/cz-lib.sh
+
+fallback() {
+    echo "$1"
+    echo "Falling back to manual passphrase."
+    exec /sbin/linuxpba 2>/tmp/pbaerror.log
+}
+
+echo "CryptoZero boot authorization"
+
+CIKDEV=$(cz_find_cik_dev) || fallback "CIK microSD not found."
+CIK=$(cz_read_cik "$CIKDEV") || fallback "CIK not valid on $CIKDEV."
+
+PIN=""
+if [ "$CZ_USE_PIN" = 1 ]; then
+    printf 'PIN: '; stty -echo; read -r PIN; stty echo; echo
+fi
+
+TPMSEC=$(cz_unseal "$PIN") || fallback "TPM refused to release secret (PCR mismatch, wrong PIN, or lockout)."
+PIN=""
+
+KEY=$(cz_derive "$TPMSEC" "$CIK")
+TPMSEC=""; CIK=""
+
+if printf '%s\n' "$KEY" | /sbin/linuxpba --key-stdin; then
+    KEY=""
+    echo "Access granted. Starting the system..."
+    sync
+    reboot -f
+fi
+KEY=""
+fallback "Unlock failed."

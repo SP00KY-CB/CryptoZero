@@ -1,0 +1,87 @@
+#!/bin/sh
+# Enroll a drive: generate TPM secret + CIK, seal/write them, verify the
+# round trip, then (only after verification) set the Opal password.
+#
+#   cz-enroll <opal-device> <cik-partition> [--pba UEFI64.img] [--escrow FILE]
+#
+# <cik-partition> must be a GPT partition named "$CZ_CIK_PARTNAME" (see docs).
+# Run from the PBA/rescue image so PCR values match what the PBA will see.
+. /usr/lib/cryptozero/cz-lib.sh
+set -e
+
+[ $# -ge 2 ] || { sed -n '2,7p' "$0"; exit 1; }
+DEV=$1; CIKPART=$2; shift 2
+PBA=""; ESCROW=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pba) PBA=$2; shift 2;;
+        --escrow) ESCROW=$2; shift 2;;
+        *) echo "unknown option $1"; exit 1;;
+    esac
+done
+
+[ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ] || { echo "No TPM device found."; exit 1; }
+sedutil-cli --isValidSED "$DEV" >/dev/null 2>&1 || true
+sedutil-cli --query "$DEV" | grep -q "Opal 2" || { echo "$DEV is not an Opal 2 drive."; exit 1; }
+
+printf 'Current Opal SID/Admin1 password (empty if drive is not set up yet): '
+stty -echo; read -r OLDPW; stty echo; echo
+PIN=""
+if [ "$CZ_USE_PIN" = 1 ]; then
+    printf 'New PIN: '; stty -echo; read -r PIN; stty echo; echo
+    printf 'Repeat PIN: '; stty -echo; read -r PIN2; stty echo; echo
+    [ "$PIN" = "$PIN2" ] && [ -n "$PIN" ] || { echo "PIN mismatch/empty."; exit 1; }
+fi
+
+rand_hex() { dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; }
+TPMSEC=$(rand_hex); CIK=$(rand_hex)
+
+W=/tmp/cz-enroll.$$; mkdir -m 700 "$W"; trap 'rm -rf "$W"' EXIT
+
+echo "== Sealing TPM secret to handle $CZ_TPM_HANDLE (PCRs $CZ_PCRS)"
+# Replace a previous enrollment if present.
+tpm2_evictcontrol -C o -c "$CZ_TPM_HANDLE" >/dev/null 2>&1 || true
+tpm2_createprimary -C o -c "$W/prim.ctx" >/dev/null
+tpm2_startauthsession -S "$W/s.ctx" >/dev/null
+tpm2_policypcr -S "$W/s.ctx" -l "$CZ_PCRS" -L "$W/pol.dat" >/dev/null
+CREATE_AUTH=""
+if [ "$CZ_USE_PIN" = 1 ]; then
+    tpm2_policyauthvalue -S "$W/s.ctx" -L "$W/pol.dat" >/dev/null
+    CREATE_AUTH="-p $PIN"
+fi
+tpm2_flushcontext "$W/s.ctx" >/dev/null
+cz_hex2bin "$TPMSEC" > "$W/secret.bin"
+tpm2_create -C "$W/prim.ctx" -L "$W/pol.dat" -i "$W/secret.bin" $CREATE_AUTH \
+    -u "$W/k.pub" -r "$W/k.priv" >/dev/null
+tpm2_load -C "$W/prim.ctx" -u "$W/k.pub" -r "$W/k.priv" -c "$W/k.ctx" >/dev/null
+tpm2_evictcontrol -C o -c "$W/k.ctx" "$CZ_TPM_HANDLE" >/dev/null
+rm -f "$W/secret.bin"
+
+echo "== Writing CIK to $CIKPART"
+cz_write_cik "$CIKPART" "$CIK"
+
+echo "== Verifying round trip (no changes to the drive yet)"
+V_TPM=$(cz_unseal "$PIN") && V_CIK=$(cz_read_cik "$CIKPART") || { echo "Verification FAILED; drive untouched."; exit 1; }
+[ "$V_TPM" = "$TPMSEC" ] && [ "$V_CIK" = "$CIK" ] || { echo "Verification mismatch; drive untouched."; exit 1; }
+KEY=$(cz_derive "$TPMSEC" "$CIK")
+
+if [ -n "$ESCROW" ]; then
+    umask 077
+    printf 'tpm_secret=%s\ncik=%s\nopal_password=%s\n' "$TPMSEC" "$CIK" "$KEY" > "$ESCROW"
+    echo "Escrow written to $ESCROW -- store it OFFLINE, then erase it from this medium."
+fi
+
+echo "== Programming Opal on $DEV"
+if [ -n "$OLDPW" ]; then
+    sedutil-cli --setSIDPassword "$OLDPW" "$KEY" "$DEV"
+    sedutil-cli --setAdmin1Pwd "$OLDPW" "$KEY" "$DEV"
+else
+    sedutil-cli --initialSetup "$KEY" "$DEV"
+fi
+if [ -n "$PBA" ]; then
+    sedutil-cli --enableLockingRange 0 "$KEY" "$DEV"
+    sedutil-cli --setLockingRange 0 LK "$KEY" "$DEV"
+    sedutil-cli --setMBRDone off "$KEY" "$DEV"
+    sedutil-cli --loadPBAimage "$KEY" "$PBA" "$DEV"
+fi
+echo "Done. Power-cycle to test.  Keep the escrow copy: losing the TPM secret or CIK loses the data."
