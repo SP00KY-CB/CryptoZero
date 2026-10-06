@@ -68,26 +68,37 @@ Each user should ideally sign their own build.
 2. **PCR 7 changes** when `db`/`dbx`/Secure Boot state change (including some
    firmware updates); **PCR 11 changes** with every rebuilt UKI. After either,
    unsealing fails and the PBA falls back to the passphrase prompt: type the
-   `opal_password` from your escrow file, boot, then re-run `cz-enroll`
-   (from the new USB image) to reseal. A rebuilt PBA must also be re-loaded
-   into the shadow MBR (`cz-enroll --pba`).
+   `opal_password` from your escrow file and boot. To reseal, evict the old
+   object from the OS (`tpm2_evictcontrol -C o -c 0x81010020`), boot the new
+   USB image (an empty handle gives the enrollment shell) and run `cz-enroll`
+   with the escrow `opal_password` as the current password. A rebuilt PBA
+   must also be re-loaded into the shadow MBR (`cz-enroll --pba`).
 3. **Losing the TPM secret or the CIK loses the data.** Use `--escrow`, keep
    it offline, and consider a second Opal user as break-glass.
 4. Opal passwords are passed on `sedutil-cli` command lines (visible in `ps`
    inside the PBA environment only).
 5. Whoever holds `db.key` can sign anything your firmware will boot.
-6. Sleep (S3) is unsupported by this sedutil fork.
+6. The PBA image keeps upstream's console root login (reached via the
+   `debug` passphrase). `cz-unlock` extends the last policy PCR right after
+   its unseal attempt and before any fallback, so that shell can no longer
+   satisfy the TPM policy. The enrollment shell only appears when the TPM
+   reports the handle empty, i.e. there is nothing to unseal.
+7. Sleep (S3) is unsupported by this sedutil fork.
 
 ## Status: partially tested
 
 Verified on a dev machine: key generation (`gen-keys.sh`), UKI build and
 signing (`mkuki`, with a dummy kernel), `sbverify`, the CIK hex/partition
-parsing and key derivation under `dash`, and that the C++ compiles.
+parsing and key derivation under `dash`, the C++ compiles, and the TPM
+logic against a software TPM (swtpm, tpm2-tools 5.6): sealing, PIN/no-PIN
+policy unseal, wrong-PIN refusal, no bare-password bypass, the post-unseal
+PCR lock, re-enrollment over an existing handle.
 **Not verified:** a real Buildroot build (the bump 2019.02.6 -> 2022.02.12 in
 `images/conf` and the old 4.14 kernel config via `olddefconfig`), that the
-kernel boots as a UKI under a given firmware, tpm2-tools flag spellings,
-busybox applets (`od`, `sha256sum`, `stty`), TPM unsealing, and anything on
-a real SED. The 32-bit/BIOS images are untouched. Test on expendable data.
+kernel boots as a UKI under a given firmware, tpm2-tools older than 5.6,
+busybox applets (`od`, `sha256sum`, `stty`), a real TPM's PCR 7/11 values
+across USB vs shadow-MBR boots, systemd-stub booting the old 4.14 kernel,
+and anything on a real SED. The 32-bit/BIOS images are untouched. Test on expendable data.
 
 ## Setup
 

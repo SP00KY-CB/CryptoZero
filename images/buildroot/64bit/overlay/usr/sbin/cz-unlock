@@ -2,8 +2,11 @@
 # Pre-boot authentication: TPM secret (+PIN) + CIK on microSD -> Opal unlock.
 # Falls back to the stock passphrase prompt if either factor is unavailable.
 . /usr/lib/cryptozero/cz-lib.sh
+# Dying here would drop to the console login with the PCRs still unlockable.
+trap '' INT QUIT TSTP
 
 fallback() {
+    cz_lock_tpm
     echo "$1"
     echo "Falling back to manual passphrase."
     exec /sbin/linuxpba 2>/tmp/pbaerror.log
@@ -14,11 +17,12 @@ echo "CryptoZero boot authorization"
 # TPM present but nothing sealed yet (or TPM was cleared): enrollment mode.
 # The shell grants nothing on an enrolled machine: the drive stays locked
 # until the Opal password is supplied.
-if { [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; } && ! tpm2_readpublic -c "$CZ_TPM_HANDLE" >/dev/null 2>&1; then
+if cz_tpm_unenrolled; then
     echo
     echo "No sealed secret found in the TPM: enrollment mode."
     echo "  cz-enroll <opal-dev> <cik-partition> --pba <boot-usb-dev> --escrow FILE"
     echo "  linuxpba      (enter the Opal passphrase manually, e.g. after a TPM clear)"
+    trap - INT QUIT TSTP
     exec /bin/sh -l
 fi
 
@@ -30,8 +34,10 @@ if [ "$CZ_USE_PIN" = 1 ]; then
     printf 'PIN: '; stty -echo; read -r PIN; stty echo; echo
 fi
 
-TPMSEC=$(cz_unseal "$PIN") || fallback "TPM refused to release secret (PCR mismatch, wrong PIN, or lockout)."
+TPMSEC=$(cz_unseal "$PIN"); rc=$?
 PIN=""
+cz_lock_tpm
+[ $rc -eq 0 ] || fallback "TPM refused to release secret (PCR mismatch, wrong PIN, or lockout)."
 
 KEY=$(cz_derive "$TPMSEC" "$CIK")
 TPMSEC=""; CIK=""

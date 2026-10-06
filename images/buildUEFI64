@@ -18,6 +18,8 @@ BUILDIMG=${BUILDTYPE}-${VERSIONINFO}.img
 [  -f scratch/buildroot/64bit/images/rootfs.cpio.xz ] || { echo " prereqs are not available "; exit 1; }
 [  -f scratch/buildroot/64bit/target/sbin/linuxpba  ] || { echo " prereqs are not available "; exit 1; }
 [  -f scratch/buildroot/64bit/target/sbin/sedutil-cli  ] || { echo " prereqs are not available "; exit 1; }
+# olddefconfig silently drops options whose dependencies are unmet
+[  -e scratch/buildroot/64bit/target/usr/bin/tpm2_unseal  ] || { echo " tpm2-tools missing from the PBA rootfs "; exit 1; }
 [  -f buildroot/uki.cmdline ] || { echo " prereqs are not available "; exit 1; }
 
 # Start fresh

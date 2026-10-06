@@ -57,13 +57,24 @@ cz_unseal() {
     auth="session:$S"
     if [ "$CZ_USE_PIN" = 1 ]; then
         tpm2_policyauthvalue -S "$S" >/dev/null 2>&1 || { tpm2_flushcontext "$S" >/dev/null 2>&1; rm -f "$S"; return 1; }
-        auth="session:$S+$1"
+        auth="session:$S+str:$1"
     fi
     out=$(tpm2_unseal -c "$CZ_TPM_HANDLE" -p "$auth" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
-    rc=$?
     tpm2_flushcontext "$S" >/dev/null 2>&1; rm -f "$S"
     [ "${#out}" -eq 64 ] || return 1
-    echo "$out"; return $rc
+    echo "$out"
+}
+
+# Extend the last policy PCR so nothing else in this boot (fallback prompt,
+# the "debug" root login) can satisfy the policy and unseal the secret.
+cz_lock_tpm() {
+    tpm2_pcrextend "${CZ_PCRS##*[:,]}:${CZ_PCRS%%:*}=$(printf cryptozero-locked | sha256sum | cut -d' ' -f1)" >/dev/null 2>&1
+}
+
+# True only if the TPM answers and positively has no object at CZ_TPM_HANDLE.
+cz_tpm_unenrolled() {
+    caps=$(tpm2_getcap handles-persistent 2>/dev/null) || return 1
+    ! echo "$caps" | grep -qi "$CZ_TPM_HANDLE"
 }
 
 # cz_derive TPMHEX CIKHEX -> 64 hex chars used as the Opal password
