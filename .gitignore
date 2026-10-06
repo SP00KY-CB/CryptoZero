@@ -200,3 +200,5 @@ windows/installer/exe
 *.key
 *.pem
 secureboot-keys/
+!/images/secureboot/
+!/images/secureboot/*
